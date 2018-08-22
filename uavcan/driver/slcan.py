@@ -20,6 +20,7 @@ import copy
 from logging import getLogger
 from .common import DriverError, TxQueueFullError, CANFrame, AbstractDriver
 from .timestamp_estimator import TimestampEstimator
+from uavcan.transport import Transfer
 
 try:
     import queue
@@ -127,12 +128,13 @@ class RxWorker:
     SELECT_TIMEOUT = 0.1
     READ_BUFFER_SIZE = 1024 * 8             # Arbitrary large number
 
-    def __init__(self, conn, rx_queue, ts_estimator_mono, ts_estimator_real, termination_condition):
+    def __init__(self, conn, rx_queue, ts_estimator_mono, ts_estimator_real, termination_condition, blacklist):
         self._conn = conn
         self._output_queue = rx_queue
         self._ts_estimator_mono = ts_estimator_mono
         self._ts_estimator_real = ts_estimator_real
         self._termination_condition = termination_condition
+        self._blacklist = blacklist
 
         if RUNNING_ON_WINDOWS:
             # select() doesn't work on serial ports under Windows, so we have to resort to workarounds. :(
@@ -172,6 +174,14 @@ class RxWorker:
 
         # Parsing ID and DLC
         packet_id = int(line[1:1 + id_len], 16)
+
+        transfer = Transfer()
+        transfer.message_id = packet_id
+
+        if transfer.data_type_id in self._blacklist and not transfer.service_not_message:
+            # Stop processing this message as it is in the blacklist 
+            return
+
         if self.PY2_COMPAT:
             packet_len = int(line[1 + id_len])              # This version is horribly slow
         else:
@@ -474,7 +484,8 @@ def _io_process(device,
                 baudrate=None,
                 max_adapter_clock_rate_error_ppm=None,
                 fixed_rx_delay=None,
-                max_estimated_rx_delay_to_resync=None):
+                max_estimated_rx_delay_to_resync=None,
+                rx_blacklist=[]):
     try:
         # noinspection PyUnresolvedReferences
         from logging.handlers import QueueHandler
@@ -532,7 +543,8 @@ def _io_process(device,
                              rx_queue=rx_queue,
                              ts_estimator_mono=ts_estimator_mono,
                              ts_estimator_real=ts_estimator_real,
-                             termination_condition=lambda: should_exit)
+                             termination_condition=lambda: should_exit,
+                             blacklist=rx_blacklist)
         try:
             rx_worker.run()
         except Exception as ex:
